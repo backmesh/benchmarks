@@ -1,0 +1,28 @@
+name: bench
+on:
+  push:
+    branches: [bench]
+permissions:
+  contents: read
+jobs:
+  typescript:
+    runs-on: ${{ vars.BENCH_RUNNER }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { repository: prettier/prettier, ref: 3.3.3 }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: corepack enable && yarn install --immutable
+      - run: yarn build
+  rust:
+    runs-on: ${{ vars.BENCH_RUNNER }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { repository: BurntSushi/ripgrep, ref: 14.1.1 }
+      - run: cargo build --release --locked
+  docker:
+    runs-on: ${{ vars.BENCH_RUNNER }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { repository: excalidraw/excalidraw, ref: v0.17.6 }
+      - run: docker build -t bench .
