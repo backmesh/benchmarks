@@ -1,0 +1,52 @@
+name: cache-debug
+# Why backmesh/cache saves from this repository never restore: watch the
+# runner's token file, then run the post-job uploader inside the job, where
+# its result line is visible. Prints the token file's state and prefixes,
+# never its tokens.
+on:
+  push:
+    branches: [cache-debug]
+permissions:
+  contents: read
+jobs:
+  debug:
+    runs-on: backmesh-4
+    steps:
+      - name: Token file, every second for 90 s
+        run: |
+          f=/run/anycloud-secrets/_bm-cache-$RUNNER_NAME/BACKMESH_CACHE
+          echo "RUNNER_NAME=$RUNNER_NAME"
+          ls -la /run/anycloud-secrets 2>&1 | head
+          last=
+          for i in $(seq 0 90); do
+            if [ -f "$f" ]; then
+              s=$(jq -c '{state, reason, bucket, region, accountUrl, prefixes, expiresAt}' "$f" 2>&1)
+            else
+              s=absent
+            fi
+            [ "$s" != "$last" ] && echo "t=${i}s $s" && last=$s
+            sleep 1
+          done
+      - run: |
+          mkdir -p "$GITHUB_WORKSPACE/../dbg"
+          head -c 1000000 /dev/urandom >"$GITHUB_WORKSPACE/../dbg/blob"
+      - uses: backmesh/cache/save@v1
+        with:
+          path: ${{ github.workspace }}/../dbg
+          key: dbg-${{ github.run_id }}
+      - name: Run the post-job uploader now
+        run: |
+          plans=$(realpath "$GITHUB_WORKSPACE/../..")/_backmesh-cache
+          ls -la "$plans" "$plans"/* 2>&1 | head -20
+          for p in "$plans"/*/plan.json; do
+            jq -c 'del(.token, .tokens)' "$p"
+            up=$(jq -r '.uploader // empty' "$p")
+            [ -n "$up" ] || up=$(find "$(realpath "$GITHUB_WORKSPACE/../..")/_actions/backmesh/cache" -name upload.mjs | head -1)
+            echo "uploader=$up"
+            sudo -n --preserve-env=RUNNER_NAME,RUNNER_TEMP node "$up" "$p" 2>&1 \
+              | sed -E 's/(sig|Signature|X-Amz-[A-Za-z-]+|token)=[^&" ]*/\1=REDACTED/g'
+          done
+      - uses: backmesh/cache/restore@v1
+        with:
+          path: ${{ github.workspace }}/../dbg
+          key: dbg-${{ github.run_id }}
