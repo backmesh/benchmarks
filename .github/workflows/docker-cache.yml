@@ -22,7 +22,9 @@ jobs:
       # The runner Job binds /mnt at the same path on the VM, so the
       # BuildKit container the host's Docker starts sees the same directory.
       STATE: /mnt/bkstate
-      PACKED: /mnt/bkcache
+      # The packed state sits on the job's own filesystem, so the save can
+      # hard-link it rather than copy it.
+      PACKED: ${{ github.workspace }}/../bkcache
       SRC: ${{ github.workspace }}/../src
       BUILDKIT: moby/buildkit:buildx-stable-1
     steps:
@@ -45,7 +47,7 @@ jobs:
         id: restore
         uses: backmesh/cache/restore@v1
         with:
-          path: /mnt/bkcache
+          path: ${{ github.workspace }}/../bkcache
           key: bk-${{ matrix.image }}-${{ github.run_id }}
           restore-keys: bk-${{ matrix.image }}-
       - name: Unpack the builder state
@@ -81,7 +83,7 @@ jobs:
         if: matrix.arm == 'warm'
         uses: backmesh/cache/save@v1
         with:
-          path: /mnt/bkcache
+          path: ${{ github.workspace }}/../bkcache
           key: bk-${{ matrix.image }}-${{ github.run_id }}
       - name: Report
         if: always()
@@ -112,3 +114,30 @@ jobs:
         with:
           name: result-${{ matrix.image }}-${{ matrix.arm }}
           path: result.json
+  # Whether a save from this repository reaches the bucket at all, from a
+  # path on /mnt (copied into the snapshot) and one in the job's work
+  # directory (hard-linked). The next round's restore shows a hit or a miss.
+  control:
+    strategy:
+      fail-fast: false
+      matrix:
+        place: [mnt, work]
+    runs-on: backmesh-4
+    steps:
+      - id: dir
+        run: |
+          d=/mnt/ctl; [ "${{ matrix.place }}" = work ] && d="$GITHUB_WORKSPACE/../ctl"
+          echo "dir=$d" >>"$GITHUB_OUTPUT"
+      - uses: backmesh/cache/restore@v1
+        with:
+          path: ${{ steps.dir.outputs.dir }}
+          key: ctl-${{ matrix.place }}-${{ github.run_id }}
+          restore-keys: ctl-${{ matrix.place }}-
+      - run: |
+          ls -la "${{ steps.dir.outputs.dir }}" 2>/dev/null || echo "nothing restored"
+          rm -rf "${{ steps.dir.outputs.dir }}"; mkdir -p "${{ steps.dir.outputs.dir }}"
+          head -c 1000000 /dev/urandom >"${{ steps.dir.outputs.dir }}/blob"
+      - uses: backmesh/cache/save@v1
+        with:
+          path: ${{ steps.dir.outputs.dir }}
+          key: ctl-${{ matrix.place }}-${{ github.run_id }}
