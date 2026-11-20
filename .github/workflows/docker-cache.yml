@@ -1,0 +1,114 @@
+name: docker-cache
+# A Docker build cold against one whose BuildKit state (layers, cache mounts
+# and base images) is kept between runs with backmesh/cache. A push to the
+# docker-cache branch is one round; docker-cache/README.md has the method.
+on:
+  push:
+    branches: [docker-cache]
+permissions:
+  contents: read
+concurrency:
+  group: docker-cache
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [k6, node-heavy, go-heavy]
+        arm: [cold, warm]
+    runs-on: backmesh-4
+    env:
+      # The runner Job binds /mnt at the same path on the VM, so the
+      # BuildKit container the host's Docker starts sees the same directory.
+      STATE: /mnt/bkstate
+      PACKED: /mnt/bkcache
+      SRC: ${{ github.workspace }}/../src
+      BUILDKIT: moby/buildkit:buildx-stable-1
+    steps:
+      - name: Mark start
+        run: echo "start $(date +%s.%N)" >"$RUNNER_TEMP/marks"
+      - uses: actions/checkout@v5
+      - name: Source, with this round's one-line change
+        run: |
+          if [ "${{ matrix.image }}" = k6 ]; then
+            git clone -q --depth 1 --branch v0.54.0 https://github.com/grafana/k6 "$SRC"
+            file=main.go
+          else
+            cp -a "docker-cache/${{ matrix.image }}" "$SRC"
+            file=main.go; [ "${{ matrix.image }}" = node-heavy ] && file=src/index.ts
+          fi
+          echo "// round $GITHUB_RUN_ID" >>"$SRC/$file"
+          echo "restore_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+      - name: Restore the builder state
+        if: matrix.arm == 'warm'
+        id: restore
+        uses: backmesh/cache/restore@v1
+        with:
+          path: /mnt/bkcache
+          key: bk-${{ matrix.image }}-${{ github.run_id }}
+          restore-keys: bk-${{ matrix.image }}-
+      - name: Unpack the builder state
+        run: |
+          echo "unpack_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          sudo mkdir -p "$STATE"
+          if [ -f "$PACKED/state.tar.zst" ]; then
+            sudo tar -I 'zstd -d -T0' -xpf "$PACKED/state.tar.zst" -C "$STATE"
+            echo "hit 1" >>"$RUNNER_TEMP/marks"
+          fi
+          echo "builder_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+      - name: Start BuildKit
+        run: |
+          docker run -d --name bk --privileged -v "$STATE:/var/lib/buildkit" "$BUILDKIT"
+          docker buildx create --name bench --driver remote docker-container://bk
+          docker buildx inspect --bootstrap bench
+          echo "build_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+      - name: Build
+        run: |
+          docker buildx build --builder bench --load -t bench "$SRC"
+          echo "build_end $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+      - name: Pack the builder state
+        if: matrix.arm == 'warm'
+        run: |
+          docker stop bk
+          sudo rm -rf "$PACKED"
+          mkdir -p "$PACKED"
+          sudo tar -I 'zstd -1 -T0' -cpf "$PACKED/state.tar.zst" -C "$STATE" .
+          sudo chown "$(id -u):$(id -g)" "$PACKED/state.tar.zst"
+          echo "pack_end $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          echo "bytes $(stat -c %s "$PACKED/state.tar.zst")" >>"$RUNNER_TEMP/marks"
+      - name: Save the builder state
+        if: matrix.arm == 'warm'
+        uses: backmesh/cache/save@v1
+        with:
+          path: /mnt/bkcache
+          key: bk-${{ matrix.image }}-${{ github.run_id }}
+      - name: Report
+        if: always()
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARM: ${{ matrix.arm }}
+          MATCHED: ${{ steps.restore.outputs.cache-matched-key }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = Object.fromEntries(fs.readFileSync(process.env.RUNNER_TEMP + "/marks", "utf8")
+              .trim().split("\n").map((l) => l.split(" ")).map(([k, v]) => [k, Number(v)]));
+            const s = (a, b) => (m[a] && m[b] ? +(m[b] - m[a]).toFixed(1) : null);
+            const r = {
+              image: process.env.IMAGE, arm: process.env.ARM, run: process.env.GITHUB_RUN_ID,
+              hit: !!m.hit, matched: process.env.MATCHED || null, cpus: require("os").cpus().length,
+              restore: s("restore_start", "unpack_start"), unpack: s("unpack_start", "builder_start"),
+              builder: s("builder_start", "build_start"), build: s("build_start", "build_end"),
+              pack: s("build_end", "pack_end"), stateBytes: m.bytes ?? null,
+            };
+            r.total = +[r.restore, r.unpack, r.builder, r.build].reduce((a, b) => a + (b ?? 0), 0).toFixed(1);
+            fs.writeFileSync("result.json", JSON.stringify(r, null, 2));
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "```json\n" + JSON.stringify(r, null, 2) + "\n```\n");
+          '
+          cat result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.image }}-${{ matrix.arm }}
+          path: result.json
