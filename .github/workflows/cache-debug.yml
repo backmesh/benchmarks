@@ -18,7 +18,7 @@ jobs:
           echo "RUNNER_NAME=$RUNNER_NAME"
           ls -la /run/anycloud-secrets 2>&1 | head
           last=
-          for i in $(seq 0 90); do
+          for i in $(seq 0 30); do
             if [ -f "$f" ]; then
               s=$(jq -c '{state, reason, bucket, region, accountUrl, prefixes, expiresAt}' "$f" 2>&1)
             else
@@ -43,7 +43,7 @@ jobs:
             up=$(jq -r '.uploader // empty' "$p")
             [ -n "$up" ] || up=$(find "$(realpath "$GITHUB_WORKSPACE/../..")/_actions/backmesh/cache" -name upload.mjs | head -1)
             echo "uploader=$up"
-            sudo -n --preserve-env=RUNNER_NAME,RUNNER_TEMP node "$up" "$p" 2>&1 \
+            (cd "$(realpath "$GITHUB_WORKSPACE/../..")" && sudo -n --preserve-env=RUNNER_NAME,RUNNER_TEMP node "$up" "$p") 2>&1 \
               | sed -E 's/(sig|Signature|X-Amz-[A-Za-z-]+|token)=[^&" ]*/\1=REDACTED/g'
           done
       - uses: backmesh/cache/restore@v1
