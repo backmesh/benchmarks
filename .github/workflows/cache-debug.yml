@@ -28,11 +28,11 @@ jobs:
             sleep 1
           done
       - run: |
-          mkdir -p "$GITHUB_WORKSPACE/../dbg"
-          head -c 1000000 /dev/urandom >"$GITHUB_WORKSPACE/../dbg/blob"
+          mkdir -p "$GITHUB_WORKSPACE-dbg"
+          head -c 1000000 /dev/urandom >"$GITHUB_WORKSPACE-dbg/blob"
       - uses: backmesh/cache/save@v1
         with:
-          path: ${{ github.workspace }}/../dbg
+          path: ${{ github.workspace }}-dbg
           key: dbg-${{ github.run_id }}
       - name: Run the post-job uploader now
         run: |
@@ -48,5 +48,5 @@ jobs:
           done
       - uses: backmesh/cache/restore@v1
         with:
-          path: ${{ github.workspace }}/../dbg
+          path: ${{ github.workspace }}-dbg
           key: dbg-${{ github.run_id }}
