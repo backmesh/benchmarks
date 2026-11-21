@@ -24,7 +24,7 @@ jobs:
       STATE: /mnt/bkstate
       # The packed state sits on the job's own filesystem, so the save can
       # hard-link it rather than copy it.
-      PACKED: ${{ github.workspace }}/../bkcache
+      PACKED: ${{ github.workspace }}-bkcache
       SRC: ${{ github.workspace }}/../src
       BUILDKIT: moby/buildkit:buildx-stable-1
     steps:
@@ -47,7 +47,7 @@ jobs:
         id: restore
         uses: backmesh/cache/restore@v1
         with:
-          path: ${{ github.workspace }}/../bkcache
+          path: ${{ github.workspace }}-bkcache
           key: bk-${{ matrix.image }}-${{ github.run_id }}
           restore-keys: bk-${{ matrix.image }}-
       - name: Unpack the builder state
@@ -83,7 +83,7 @@ jobs:
         if: matrix.arm == 'warm'
         uses: backmesh/cache/save@v1
         with:
-          path: ${{ github.workspace }}/../bkcache
+          path: ${{ github.workspace }}-bkcache
           key: bk-${{ matrix.image }}-${{ github.run_id }}
       - name: Report
         if: always()
@@ -126,7 +126,7 @@ jobs:
     steps:
       - id: dir
         run: |
-          d=/mnt/ctl; [ "${{ matrix.place }}" = work ] && d="$GITHUB_WORKSPACE/../ctl"
+          d=/mnt/ctl; [ "${{ matrix.place }}" = work ] && d="$GITHUB_WORKSPACE-ctl"
           echo "dir=$d" >>"$GITHUB_OUTPUT"
       - uses: backmesh/cache/restore@v1
         with:
