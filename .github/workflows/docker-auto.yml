@@ -98,7 +98,10 @@ jobs:
           echo "capped $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
           rm -rf "$PIECES" "$RUNNER_TEMP"/list.*
           mkdir -p "$PIECES"
-          snaps=runc-overlayfs/snapshots/snapshots
+          echo "state layout:"; sudo du -h --max-depth=3 "$STATE" | sort -rh | head -15
+          snaps=$(cd "$STATE" && sudo find . -mindepth 2 -maxdepth 4 -type d -path '*/snapshots/snapshots' | head -1 | sed 's#^\./##')
+          echo "snapshot dir: ${snaps:-none}"
+          [ -n "$snaps" ] || snaps=none
           (cd "$STATE" && sudo du -sk $snaps/* 2>/dev/null) | sort -rn \
             | awk -v n=15 -v d="$RUNNER_TEMP" '{b=0; for(i=1;i<n;i++) if(s[i]<s[b]) b=i; s[b]+=$1; print $2 > (d "/list." b)}'
           sudo sh -c "tar -C '$STATE' --exclude=./$snaps -cpf - . | zstd -1 -q -T2 -o '$PIECES/rest.tar.zst'" &
@@ -107,6 +110,7 @@ jobs:
             sudo sh -c "tar -C '$STATE' -cpf - -T '$l' | zstd -1 -q -o '$PIECES/$(basename "$l").tar.zst'" &
           done
           wait
+          echo "packed $(ls "$PIECES" | wc -l) pieces in $(awk -v b="$(date +%s.%N)" '/^capped/{print b - $2}' "$RUNNER_TEMP/marks") s"
           sudo chown -R "$(id -u):$(id -g)" "$PIECES"
           echo "pack_end $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
           echo "bytes $(du -sb "$PIECES" | cut -f1)" >>"$RUNNER_TEMP/marks"
