@@ -26,7 +26,7 @@ from the source layer on.
 
 A push to the `docker-cache` branch is one round. The first round only seeds
 the warm arm. Each job's `result.json` artifact and step summary hold its
-times in seconds: `restore`, `unpack`, `builder` (BuildKit's start), `build`
+times in seconds: `token` (the warm arm's wait for its cache token, not in `total`), `restore`, `unpack`, `builder` (BuildKit's start), `build`
 and their sum, `total`; `pack` is the warm arm's packing after the build,
 which isn't in `total` because the upload runs after the job.
 

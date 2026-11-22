@@ -41,7 +41,20 @@ jobs:
             file=main.go; [ "${{ matrix.image }}" = node-heavy ] && file=src/index.ts
           fi
           echo "// round $GITHUB_RUN_ID" >>"$SRC/$file"
-          echo "restore_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          echo "token_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+      # The token's arrival, timed on its own: a restore built into the
+      # runner would wait for it during the job's setup, not in a step.
+      - name: Wait for the cache token
+        if: matrix.arm == 'warm'
+        run: |
+          f=/run/anycloud-secrets/_bm-cache-$RUNNER_NAME/BACKMESH_CACHE
+          for i in $(seq 1 300); do
+            [ "$(jq -r .state "$f" 2>/dev/null)" = ready ] && break
+            sleep 0.1
+          done
+          echo "token state: $(jq -r .state "$f" 2>/dev/null || echo absent)"
+      - name: Mark the restore's start
+        run: echo "restore_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
       - name: Restore the builder state
         if: matrix.arm == 'warm'
         id: restore
@@ -100,6 +113,7 @@ jobs:
             const r = {
               image: process.env.IMAGE, arm: process.env.ARM, run: process.env.GITHUB_RUN_ID,
               hit: !!m.hit, matched: process.env.MATCHED || null, cpus: require("os").cpus().length,
+              token: s("token_start", "restore_start"),
               restore: s("restore_start", "unpack_start"), unpack: s("unpack_start", "builder_start"),
               builder: s("builder_start", "build_start"), build: s("build_start", "build_end"),
               pack: s("build_end", "pack_end"), stateBytes: m.bytes ?? null,
