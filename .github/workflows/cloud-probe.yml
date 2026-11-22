@@ -1,0 +1,17 @@
+name: cloud-probe
+# Which clouds' backmesh labels the backmesh org's install serves.
+on:
+  push:
+    branches: [cloud-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        label: [backmesh-4, backmesh-gcp-4, backmesh-azure-4]
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 5
+    steps:
+      - run: nproc; cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true
