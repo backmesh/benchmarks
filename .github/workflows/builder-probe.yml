@@ -1,6 +1,7 @@
 name: builder-probe
 # Cache phase 3, row DS: which setting the runner could make before a job so
-# that a plain `docker build` uses a builder of its choosing.
+# that a plain `docker build`, in a later step, uses a builder of its choosing
+# and still loads the image into the VM's Docker.
 on:
   push:
     branches: [builder-probe]
@@ -8,26 +9,31 @@ permissions:
   contents: read
 jobs:
   probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        how: [use-default, env, alias]
     runs-on: backmesh-4
     steps:
-      - run: |
+      - name: The runner's part
+        run: |
           docker version --format 'client {{.Client.Version}} server {{.Server.Version}}'
           docker buildx version
-          cat ~/.docker/config.json 2>/dev/null || echo "no ~/.docker/config.json"
-          mkdir -p ctx && printf 'FROM busybox\nRUN echo hi\n' >ctx/Dockerfile
           sudo mkdir -p /mnt/bkstate
           docker run -d --name bk --privileged -v /mnt/bkstate:/var/lib/buildkit moby/buildkit:buildx-stable-1 >/dev/null
-          docker buildx create --name bm --driver remote docker-container://bk >/dev/null
+          docker buildx create --name bm --driver remote --driver-opt default-load=true docker-container://bk
           docker buildx inspect --bootstrap bm >/dev/null
-          try() {
-            docker image rm -f "probe-$1" >/dev/null 2>&1 || true
-            out=$(docker build --no-cache -t "probe-$1" ctx 2>&1) || echo "$out" | tail -3
-            b=$(echo "$out" | grep -m1 -oE 'building with "[^"]+"' || echo "no builder line")
-            l=$(docker image inspect "probe-$1" >/dev/null 2>&1 && echo loaded || echo "not loaded")
-            echo "RESULT $1: $b; $l"
-          }
-          docker buildx use --default bm; try A-use-default
-          BUILDX_BUILDER=bm try B-env
-          docker buildx use default
-          docker buildx install && cat ~/.docker/config.json && docker buildx use --default bm && try C-install
-          export BUILDX_BUILDER=bm; try C-install-and-env
+          case ${{ matrix.how }} in
+            use-default) docker buildx use --default bm ;;
+            env) echo BUILDX_BUILDER=bm >>"$GITHUB_ENV" ;;
+            alias) docker buildx install; docker buildx use --default bm ;;
+          esac
+          cat ~/.docker/config.json 2>/dev/null; ls ~/.docker/buildx 2>/dev/null; cat ~/.docker/buildx/current 2>/dev/null; echo
+      - name: The job's own step
+        run: |
+          mkdir -p ctx && printf 'FROM busybox\nRUN echo hi-$RANDOM\n' >ctx/Dockerfile
+          docker build -t probe ctx 2>&1 | tee out.txt
+          b=$(grep -m1 -oE 'building with "[^"]+"' out.txt || echo "no builder line")
+          l=$(docker image inspect probe >/dev/null 2>&1 && echo loaded || echo "not loaded")
+          s=$(sudo du -sh /mnt/bkstate | cut -f1)
+          echo "RESULT ${{ matrix.how }}: $b; $l; bm state $s"
