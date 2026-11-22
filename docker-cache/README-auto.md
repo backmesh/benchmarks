@@ -13,7 +13,9 @@ have no GCP or Azure runners, by the owner's choice of 2026-11-22.
   runner: they wait for the cache token (timed apart, since a built-in restore
   waits during job setup), restore the BuildKit state with
   `backmesh/cache/restore@v1`, unpack its pieces in parallel, start BuildKit on
-  it and make that builder the default (`docker buildx use --default`). After
+  it with `default-load=true` and set `BUILDX_BUILDER` to it, which the runner
+  would set in its environment for every job (`docker buildx use --default` is
+  ignored by a plain `docker build`; see builder-probe). After
   the build they cap the state at 2 GB (`docker buildx prune
   --max-used-space`), pack it into about 16 pieces split by BuildKit snapshot
   directory, and save them with `backmesh/cache/save@v1`.

@@ -73,8 +73,11 @@ jobs:
           fi
           echo "builder_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
           docker run -d --name bk --privileged -v "$STATE:/var/lib/buildkit" "$BUILDKIT"
-          docker buildx create --name bm --driver remote docker-container://bk
-          docker buildx use --default bm
+          # default-load puts the image in the VM's Docker, as the VM's own
+          # builder does; BUILDX_BUILDER sends a plain `docker build` to it
+          # (`docker buildx use --default` doesn't: builder-probe).
+          docker buildx create --name bm --driver remote --driver-opt default-load=true docker-container://bk
+          echo BUILDX_BUILDER=bm >>"$GITHUB_ENV"
           docker buildx inspect --bootstrap bm >/dev/null
       # The job's own step: a plain `docker build`.
       - name: docker build
