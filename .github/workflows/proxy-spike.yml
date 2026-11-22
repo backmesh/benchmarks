@@ -1,0 +1,119 @@
+name: proxy-spike
+# Cache phase 3, row S1: a Turborepo remote cache served by a proxy on the
+# runner from backmesh's cache bucket, against no remote cache; and
+# small-object latency against the bucket. A push to proxy-spike is one
+# round; proxy-spike/README.md has the method.
+on:
+  push:
+    branches: [proxy-spike]
+permissions:
+  contents: read
+concurrency:
+  group: proxy-spike
+  cancel-in-progress: false
+env:
+  TURBOREPO: v2.11.13
+jobs:
+  turbo:
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [local, remote]
+    runs-on: backmesh-4
+    env:
+      RESULTS: ${{ github.workspace }}-results
+      REPO: ${{ github.workspace }}-turbo
+    steps:
+      - uses: actions/checkout@v5
+      # Fetches backmesh/cache, whose store client the proxy imports.
+      - uses: backmesh/cache/restore@v1
+        with:
+          path: ${{ github.workspace }}-unused
+          key: unused
+          lookup-only: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: The example, installed
+        run: |
+          mkdir -p "$RESULTS"
+          git clone -q --depth 1 --branch "$TURBOREPO" --filter=blob:none --sparse https://github.com/vercel/turborepo "$REPO-src"
+          git -C "$REPO-src" sparse-checkout set examples/basic
+          cp -a "$REPO-src/examples/basic" "$REPO"
+          cd "$REPO"
+          corepack enable
+          pnpm install --frozen-lockfile
+      - name: Start the proxy
+        if: matrix.arm == 'remote'
+        run: |
+          chunk=$(grep -l 'function openStore' "$(realpath "$GITHUB_WORKSPACE/../..")"/_actions/backmesh/cache/v1/dist/*.mjs | head -1)
+          nohup node proxy-spike/proxy.mjs "$chunk" 4000 >"$RESULTS/proxy.log" 2>&1 &
+          for i in $(seq 1 300); do grep -q 'proxy on' "$RESULTS/proxy.log" && break; sleep 0.1; done
+          cat "$RESULTS/proxy.log"
+          {
+            echo TURBO_API=http://127.0.0.1:4000
+            echo TURBO_TOKEN=backmesh
+            echo TURBO_TEAM=backmesh
+          } >>"$GITHUB_ENV"
+      - name: turbo run build lint check-types
+        run: |
+          cd "$REPO"
+          start=$(date +%s.%N)
+          pnpm turbo run build lint check-types --summarize --ui stream --output-logs errors-only
+          end=$(date +%s.%N)
+          echo "$start $end" >"$RESULTS/turbo-times"
+      - name: Report
+        if: always()
+        env:
+          ARM: ${{ matrix.arm }}
+        run: |
+          node -e '
+            const fs = require("fs"), d = process.env.REPO + "/.turbo/runs/";
+            const runs = fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith(".json")) : [];
+            const s = runs.length ? JSON.parse(fs.readFileSync(d + runs[0], "utf8")) : { tasks: [] };
+            const [a, b] = fs.readFileSync(process.env.RESULTS + "/turbo-times", "utf8").trim().split(" ").map(Number);
+            const status = {};
+            for (const t of s.tasks) { const k = t.cache?.status === "HIT" ? (t.cache.remote ? "remoteHit" : "localHit") : "miss"; status[k] = (status[k] ?? 0) + 1; }
+            let reqs = [];
+            try { reqs = fs.readFileSync(process.env.RESULTS + "/requests.jsonl", "utf8").trim().split("\n").filter(Boolean).map(JSON.parse); } catch {}
+            const by = (m, st) => reqs.filter((r) => r.method === m && (st === undefined || r.status === st)).map((r) => r.ms).sort((x, y) => x - y);
+            const p = (a, f) => (a.length ? a[Math.floor(f * (a.length - 1))] : null);
+            const r = {
+              arm: process.env.ARM, run: process.env.GITHUB_RUN_ID, seconds: +(b - a).toFixed(1), tasks: s.tasks.length, ...status,
+              getHit: { n: by("GET", 200).length, p50: p(by("GET", 200), 0.5), p95: p(by("GET", 200), 0.95) },
+              getMiss: { n: by("GET", 404).length, p50: p(by("GET", 404), 0.5) },
+              put: { n: by("PUT").length, p50: p(by("PUT"), 0.5), p95: p(by("PUT"), 0.95) },
+              errors: reqs.filter((r) => r.status >= 500).length,
+              bytes: reqs.reduce((n, r) => n + r.bytes, 0),
+            };
+            fs.writeFileSync("result.json", JSON.stringify(r, null, 2));
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "```json\n" + JSON.stringify(r, null, 2) + "\n```\n");
+            console.log(JSON.stringify(r, null, 2));
+          '
+          cat "$RESULTS/proxy.log" 2>/dev/null | tail -20 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-turbo-${{ matrix.arm }}
+          path: result.json
+  objects:
+    runs-on: backmesh-4
+    steps:
+      - uses: actions/checkout@v5
+      - uses: backmesh/cache/restore@v1
+        with:
+          path: ${{ github.workspace }}-unused
+          key: unused
+          lookup-only: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: 2,000 objects of 8 KiB, 32 at a time; 200 serial GETs and misses
+        run: |
+          chunk=$(grep -l 'function openStore' "$(realpath "$GITHUB_WORKSPACE/../..")"/_actions/backmesh/cache/v1/dist/*.mjs | head -1)
+          node proxy-spike/objects.mjs "$chunk" result.json 2000 8192 32
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-objects
+          path: result.json
