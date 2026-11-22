@@ -28,7 +28,7 @@ jobs:
             env) echo BUILDX_BUILDER=bm >>"$GITHUB_ENV" ;;
             alias) docker buildx install; docker buildx use --default bm ;;
           esac
-          cat ~/.docker/config.json 2>/dev/null; ls ~/.docker/buildx 2>/dev/null; cat ~/.docker/buildx/current 2>/dev/null; echo
+          cat ~/.docker/config.json ~/.docker/buildx/current 2>/dev/null || true
       - name: The job's own step
         run: |
           mkdir -p ctx && printf 'FROM busybox\nRUN echo hi-$RANDOM\n' >ctx/Dockerfile
