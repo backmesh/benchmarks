@@ -1,0 +1,148 @@
+name: docker-auto
+# Cache phase 3, row DS: the automatic Docker mode, as the runner would do it,
+# against a cold build. Before the build the "runner" steps restore a BuildKit
+# state in parallel pieces and make a builder on it the default; the build is
+# a plain `docker build` that names no builder. A push to docker-auto is one
+# round; docker-cache/README-auto.md has the method.
+on:
+  push:
+    branches: [docker-auto]
+permissions:
+  contents: read
+concurrency:
+  group: docker-auto
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [k6, node-heavy, go-heavy]
+        arm: [cold, warm]
+    runs-on: backmesh-4
+    env:
+      # /mnt is bound at the same path on the VM, so the BuildKit container
+      # the host's Docker starts sees the same directory.
+      STATE: /mnt/bkstate
+      PIECES: ${{ github.workspace }}-pieces
+      SRC: ${{ github.workspace }}-src
+      BUILDKIT: moby/buildkit:buildx-stable-1
+      CAP: 2gb
+    steps:
+      - uses: actions/checkout@v5
+      - name: Source, with this round's one-line change
+        run: |
+          if [ "${{ matrix.image }}" = k6 ]; then
+            git clone -q --depth 1 --branch v0.54.0 https://github.com/grafana/k6 "$SRC"
+            file=main.go
+          else
+            cp -a "docker-cache/${{ matrix.image }}" "$SRC"
+            file=main.go; [ "${{ matrix.image }}" = node-heavy ] && file=src/index.ts
+          fi
+          echo "// round $GITHUB_RUN_ID" >>"$SRC/$file"
+          echo "token_start $(date +%s.%N)" >"$RUNNER_TEMP/marks"
+      # Runner part, before the job's steps. A built-in restore waits for the
+      # token during job setup, so its wait is timed apart.
+      - name: Wait for the cache token
+        if: matrix.arm == 'warm'
+        run: |
+          f=/run/anycloud-secrets/_bm-cache-$RUNNER_NAME/BACKMESH_CACHE
+          for i in $(seq 1 300); do
+            [ "$(jq -r .state "$f" 2>/dev/null)" = ready ] && break
+            sleep 0.1
+          done
+          echo "token state: $(jq -r .state "$f" 2>/dev/null || echo absent)"
+          echo "restore_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+      - name: Restore the pieces
+        if: matrix.arm == 'warm'
+        id: restore
+        uses: backmesh/cache/restore@v1
+        with:
+          path: ${{ github.workspace }}-pieces
+          key: dk-${{ matrix.image }}-${{ github.run_id }}
+          restore-keys: dk-${{ matrix.image }}-
+      - name: Unpack the pieces in parallel and make the builder the default
+        if: matrix.arm == 'warm'
+        run: |
+          echo "unpack_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          sudo mkdir -p "$STATE"
+          if ls "$PIECES"/*.tar.zst >/dev/null 2>&1; then
+            ls "$PIECES"/*.tar.zst | xargs -P 16 -I{} sudo sh -c 'zstd -d -q -c "$1" | tar -xpf - -C "$2"' _ {} "$STATE"
+            echo "hit 1" >>"$RUNNER_TEMP/marks"
+            echo "pieces $(ls "$PIECES"/*.tar.zst | wc -l)" >>"$RUNNER_TEMP/marks"
+          fi
+          echo "builder_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          docker run -d --name bk --privileged -v "$STATE:/var/lib/buildkit" "$BUILDKIT"
+          docker buildx create --name bm --driver remote docker-container://bk
+          docker buildx use --default bm
+          docker buildx inspect --bootstrap bm >/dev/null
+      # The job's own step: a plain `docker build`.
+      - name: docker build
+        run: |
+          echo "build_start $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          docker build -t bench "$SRC" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          echo "build_end $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          grep -m1 -oE 'building with "[^"]+"' "$RUNNER_TEMP/build.log" | sed 's/^/builder /; s/"//g; s/building with //' >>"$RUNNER_TEMP/marks" || true
+          docker image inspect bench >/dev/null 2>&1 && echo "loaded 1" >>"$RUNNER_TEMP/marks" || true
+      # Runner part, after the job: cap the state, then pack it into pieces
+      # by BuildKit snapshot directory, in parallel.
+      - name: Cap and pack the state
+        if: matrix.arm == 'warm'
+        run: |
+          docker buildx prune --builder bm --max-used-space "$CAP" -f >/dev/null 2>&1 \
+            || docker buildx prune --builder bm --keep-storage "$CAP" -f >/dev/null
+          docker stop bk >/dev/null
+          echo "capped $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          rm -rf "$PIECES" "$RUNNER_TEMP"/list.*
+          mkdir -p "$PIECES"
+          snaps=runc-overlayfs/snapshots/snapshots
+          (cd "$STATE" && sudo du -sk $snaps/* 2>/dev/null) | sort -rn \
+            | awk -v n=15 -v d="$RUNNER_TEMP" '{b=0; for(i=1;i<n;i++) if(s[i]<s[b]) b=i; s[b]+=$1; print $2 > (d "/list." b)}'
+          sudo sh -c "tar -C '$STATE' --exclude=./$snaps -cpf - . | zstd -1 -q -T2 -o '$PIECES/rest.tar.zst'" &
+          for l in "$RUNNER_TEMP"/list.*; do
+            [ -e "$l" ] || continue
+            sudo sh -c "tar -C '$STATE' -cpf - -T '$l' | zstd -1 -q -o '$PIECES/$(basename "$l").tar.zst'" &
+          done
+          wait
+          sudo chown -R "$(id -u):$(id -g)" "$PIECES"
+          echo "pack_end $(date +%s.%N)" >>"$RUNNER_TEMP/marks"
+          echo "bytes $(du -sb "$PIECES" | cut -f1)" >>"$RUNNER_TEMP/marks"
+          echo "statebytes $(sudo du -sb "$STATE" | cut -f1)" >>"$RUNNER_TEMP/marks"
+          ls -la "$PIECES"
+      - name: Save the pieces
+        if: matrix.arm == 'warm'
+        uses: backmesh/cache/save@v1
+        with:
+          path: ${{ github.workspace }}-pieces
+          key: dk-${{ matrix.image }}-${{ github.run_id }}
+      - name: Report
+        if: always()
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARM: ${{ matrix.arm }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const m = {};
+            for (const l of fs.readFileSync(process.env.RUNNER_TEMP + "/marks", "utf8").trim().split("\n")) {
+              const [k, ...v] = l.split(" "); m[k] = isNaN(Number(v[0])) ? v.join(" ") : Number(v[0]);
+            }
+            const s = (a, b) => (m[a] && m[b] ? +(m[b] - m[a]).toFixed(1) : null);
+            const r = {
+              image: process.env.IMAGE, arm: process.env.ARM, run: process.env.GITHUB_RUN_ID,
+              hit: !!m.hit, pieces: m.pieces ?? null, builder: m.builder ?? null, loaded: !!m.loaded,
+              token: s("token_start", "restore_start"), restore: s("restore_start", "unpack_start"),
+              unpack: s("unpack_start", "builder_start"), builderStart: s("builder_start", "build_start"),
+              build: s("build_start", "build_end"), cap: s("build_end", "capped"), pack: s("capped", "pack_end"),
+              packedBytes: m.bytes ?? null, stateBytes: m.statebytes ?? null,
+            };
+            r.total = +[r.restore, r.unpack, r.builderStart, r.build].reduce((a, b) => a + (b ?? 0), 0).toFixed(1);
+            fs.writeFileSync("result.json", JSON.stringify(r, null, 2));
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "```json\n" + JSON.stringify(r, null, 2) + "\n```\n");
+            console.log(JSON.stringify(r, null, 2));
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.image }}-${{ matrix.arm }}
+          path: result.json
