@@ -1,0 +1,30 @@
+# The GitHub-hosted arm: guest.sh on `ubuntu-latest`, as the VM Jobs run it,
+# in docker:27-cli with the host's Docker socket. Copy it to
+# `.github/workflows/` on a branch of a public repository, with 36e6d2e15597adf71be03309d08bc200fa5b41ef
+# set to the anycloud commit whose guest.sh it runs; the push runs it. Each
+# round's log is an artifact, which `run.ts report` reads.
+name: m8a-vs-m8i hosted
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      # Spread over the VM run's window, as its rounds are.
+      max-parallel: 3
+      matrix:
+        round: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - run: curl -fsSL -o guest.sh https://raw.githubusercontent.com/anycloud-sh/anycloud/36e6d2e15597adf71be03309d08bc200fa5b41ef/experiments/m8a-vs-m8i/guest.sh
+      - run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          -v "$PWD/guest.sh:/guest.sh:ro" docker:27-cli sh /guest.sh 2>&1
+          | tee hosted-${{ matrix.round }}.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-${{ matrix.round }}
+          path: hosted-${{ matrix.round }}.log
