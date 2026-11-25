@@ -13,7 +13,7 @@ permissions: {}
 
 jobs:
   bench:
-    runs-on: backmesh-16
+    runs-on: backmesh-ubuntu-2404-16vcpu
     timeout-minutes: 20
     strategy:
       matrix:
